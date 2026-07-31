@@ -66,6 +66,9 @@
     border-radius:10px;padding:7px 4px;text-align:center}
   .deg .n{font-size:17px;font-weight:600}
   .deg .d{font-size:10px;color:var(--dim);margin-top:1px}
+  .deg{cursor:pointer;user-select:none;transition:background .12s,transform .08s}
+  .deg:active{transform:scale(.95)}
+  .deg.play{background:#2c4a2f;border-color:var(--ok)}
   .deg.on{background:#1d3a5c;border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
   .deg.on .d{color:#a9c9f5}
 
@@ -110,7 +113,7 @@
 <div class="wrap">
 
   <header>
-    <h1>移動ド音程チェッカー <span style="color:#5b6577">v5</span></h1>
+    <h1>移動ド音程チェッカー <span style="color:#5b6577">v6</span></h1>
     <div class="keybadge" id="keyBadge">Key: C major</div>
     <button class="iconbtn" id="btnSettings">設定</button>
   </header>
@@ -196,6 +199,24 @@
         <span class="hint" id="gateHint"></span>
       </label>
       <input type="range" id="inGate" min="-95" max="-25" step="1" value="-90">
+    </div>
+
+    <h2 style="margin-top:16px">試聴音</h2>
+    <div class="field">
+      <label>音量
+        <span class="hint" id="volHint"></span>
+      </label>
+      <input type="range" id="inVol" min="0" max="100" step="1" value="50">
+    </div>
+    <div class="field">
+      <label>オクターブ
+        <span class="hint">スケールの音を出す高さ</span>
+      </label>
+      <div class="seg" id="segOct">
+        <button data-v="-1">低</button>
+        <button data-v="0" class="on">中</button>
+        <button data-v="1">高</button>
+      </div>
     </div>
 
     <h2 style="margin-top:16px">判定</h2>
@@ -320,7 +341,7 @@ function buildKey(rootPc, mode, minorSystem, minorScale, lang){
     const name = SYL[sylIdx] + accStr(acc);
     const enChrom = CHROM_EN[sylIdx + (acc>0?"+1":acc<0?"-1":"")];
     const entry = {
-      pc, inScale:true, degNum,
+      pc, iv, inScale:true, degNum,
       name: (lang==="en" && acc!==0 && enChrom) ? enChrom : name,
       deg: DEG_LABEL[(pc - rootPc + 12) % 12],
     };
@@ -418,12 +439,50 @@ function detectPitch(buf, sr, gate, minF, maxF){
 }
 
 /* ============================================================
+   試聴用の発音
+   ============================================================ */
+let playCtx = null, playMaster = null;
+
+function ensurePlayCtx(){
+  if (!playCtx){
+    playCtx = new (window.AudioContext || window.webkitAudioContext)();
+    playMaster = playCtx.createGain();
+    playMaster.gain.value = 1;
+    playMaster.connect(playCtx.destination);
+  }
+  if (playCtx.state === "suspended") playCtx.resume();
+  return playCtx;
+}
+
+// MIDI番号 → 周波数（基準ピッチ A4 の設定を反映する）
+const midiToFreq = midi => S.a4 * Math.pow(2, (midi - 69) / 12);
+
+function playNote(midi){
+  if (S.vol <= 0) return;
+  const ctx = ensurePlayCtx();
+  const f = midiToFreq(midi);
+  const t0 = ctx.currentTime;
+  const o1 = ctx.createOscillator(); o1.type = "triangle"; o1.frequency.value = f;
+  const o2 = ctx.createOscillator(); o2.type = "sine";     o2.frequency.value = f * 2;
+  const g2 = ctx.createGain(); g2.gain.value = 0.18;       // 倍音を少し足して聞き取りやすく
+  const g  = ctx.createGain();
+  const v = Math.max(0.0002, S.vol);
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.linearRampToValueAtTime(v, t0 + 0.012);
+  g.gain.exponentialRampToValueAtTime(v * 0.35, t0 + 0.35);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.95);
+  o1.connect(g); o2.connect(g2).connect(g); g.connect(playMaster);
+  o1.start(t0); o2.start(t0);
+  o1.stop(t0 + 1.0); o2.stop(t0 + 1.0);
+}
+
+/* ============================================================
    状態 / 設定
    ============================================================ */
 const S = {
   root:0, mode:"major", minorSystem:"la", minorScale:"natural",
   lang:"ja", a4:440, gateDb:-90, hold:true, agc:true, deviceId:"",
-  tol:25, smooth:0.08,
+  tol:25, smooth:0.08, vol:0.5, octShift:0,
 };
 // 判定は「周期性(clarity)」で行う。純ノイズの clarity は実測で最大 0.114 なので、
 // 0.65 を閾値にすれば音量に関係なくノイズだけを弾ける。
@@ -460,12 +519,20 @@ const $ = id => document.getElementById(id);
 function renderStrip(){
   const strip = $("strip");
   strip.innerHTML = "";
+  // 主音を C4〜B4 の範囲に置き、そこから音階を上に積む
+  const baseMidi = 60 + (S.root % 12) + S.octShift * 12;
   KEY.scale.forEach(e => {
     const d = document.createElement("div");
     d.className = "deg";
     d.dataset.pc = e.pc;
+    d.dataset.midi = baseMidi + e.iv;
     d.innerHTML = '<div class="n">' + e.name + '</div><div class="d">' +
                   e.deg + " / " + pcName(e.pc, S.root, S.mode) + "</div>";
+    d.onclick = () => {
+      playNote(Number(d.dataset.midi));
+      d.classList.add("play");
+      setTimeout(() => d.classList.remove("play"), 260);
+    };
     strip.appendChild(d);
   });
 }
@@ -594,6 +661,13 @@ function initUI(){
       };
     });
   }
+  $("inVol").value = Math.round(S.vol * 100);
+  const volTxt = () => $("volHint").textContent =
+      S.vol <= 0 ? "消音" : Math.round(S.vol * 100) + "%";
+  $("inVol").oninput = () => { S.vol = Number($("inVol").value) / 100; volTxt(); saveSettings(); };
+  volTxt();
+
+  segNum("segOct", "octShift", renderStrip);
   segNum("segTol", "tol", syncZone);
   segNum("segSmooth", "smooth");
   syncZone();
@@ -750,7 +824,7 @@ if (!window.isSecureContext){
 }
 
 // 自己テスト用フック
-window.__mdc = { buildKey, detectPitch, pcName, get S(){ return S; }, get KEY(){ return KEY; } };
+window.__mdc = { buildKey, detectPitch, pcName, playNote, midiToFreq, get playMaster(){ return playMaster; }, get playCtx(){ return playCtx; }, get S(){ return S; }, get KEY(){ return KEY; } };
 </script>
 </body>
 </html>
