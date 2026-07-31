@@ -110,7 +110,7 @@
 <div class="wrap">
 
   <header>
-    <h1>移動ド音程チェッカー <span style="color:#5b6577">v2</span></h1>
+    <h1>移動ド音程チェッカー <span style="color:#5b6577">v4</span></h1>
     <div class="keybadge" id="keyBadge">Key: C major</div>
     <button class="iconbtn" id="btnSettings">設定</button>
   </header>
@@ -195,7 +195,7 @@
       <label>無音しきい値
         <span class="hint" id="gateHint"></span>
       </label>
-      <input type="range" id="inGate" min="1" max="60" step="1" value="10">
+      <input type="range" id="inGate" min="-95" max="-25" step="1" value="-90">
     </div>
 
     <h2 style="margin-top:16px">表示</h2>
@@ -337,6 +337,10 @@ function pcName(pc, rootPc, mode){
 /* ============================================================
    ピッチ検出 —— NSDF（McLeod Pitch Method）
    ============================================================ */
+// 周期性の判定閾値。純ノイズ100回の clarity は実測で最大 0.114 だったので、
+// 0.65 なら音量に関係なくノイズを弾ける（SN比 6dB 程度の弱い音は通る）
+const CLARITY_MIN = 0.65;
+
 function detectPitch(buf, sr, gate, minF, maxF){
   const n = buf.length;
   // DC 除去 + RMS
@@ -380,7 +384,7 @@ function detectPitch(buf, sr, gate, minF, maxF){
   let chosen = best;
   for (const p of peaks){ if (nsdf[p] >= thr){ chosen = p; break; } }
   const clarity = nsdf[chosen];
-  if (clarity < 0.5) return { freq:-1, rms, clarity };
+  if (clarity < CLARITY_MIN) return { freq:-1, rms, clarity };
 
   // 放物線補間
   const x0 = nsdf[chosen-1], x1 = nsdf[chosen], x2 = nsdf[chosen+1];
@@ -395,15 +399,16 @@ function detectPitch(buf, sr, gate, minF, maxF){
    ============================================================ */
 const S = {
   root:0, mode:"major", minorSystem:"la", minorScale:"natural",
-  lang:"ja", a4:440, gate:10, hold:true, agc:true, deviceId:"",
+  lang:"ja", a4:440, gateDb:-90, hold:true, agc:true, deviceId:"",
 };
-// しきい値は S.gate/5000（= gate 10 で RMS 0.002 ≒ -54dB）
-const GATE_DIV = 5000;
-const gateRms = () => S.gate / GATE_DIV;
+// 判定は「周期性(clarity)」で行う。純ノイズの clarity は実測で最大 0.114 なので、
+// 0.65 を閾値にすれば音量に関係なくノイズだけを弾ける。
+// 音量しきい値は「無音時に計算を回さない」ためだけの下限で、既定は事実上無効(-80dB)。
+const gateRms = () => Math.pow(10, S.gateDb / 20);
 const toDb = v => v > 1e-7 ? 20 * Math.log10(v) : -100;
 // -80dB〜0dB を 0〜100% に写す（メーター表示用）
 const dbToPct = db => Math.max(0, Math.min(100, (db + 80) / 80 * 100));
-const LS = "movabledo.settings.v2";
+const LS = "movabledo.settings.v3";
 function loadSettings(){
   try{ Object.assign(S, JSON.parse(localStorage.getItem(LS) || "{}")); }catch(e){}
 }
@@ -522,12 +527,10 @@ function initUI(){
 
   $("inA4").value = S.a4;
   $("inA4").onchange = () => { S.a4 = Number($("inA4").value) || 440; saveSettings(); };
-  $("inGate").value = S.gate;
-  const gateTxt = () => {
-    $("gateHint").textContent = "これより小さい音は無視（" + toDb(gateRms()).toFixed(0) + " dB）";
-    $("lvlGate").style.left = dbToPct(toDb(gateRms())) + "%";
-  };
-  $("inGate").oninput = () => { S.gate = Number($("inGate").value); gateTxt(); saveSettings(); };
+  $("inGate").value = S.gateDb;
+  const gateTxt = () => $("gateHint").textContent =
+      S.gateDb <= -88 ? "無効（音量では弾かない）" : S.gateDb + " dB 未満は無視";
+  $("inGate").oninput = () => { S.gateDb = Number($("inGate").value); gateTxt(); saveSettings(); };
   gateTxt();
 
   const swAgc = $("swAgc");
@@ -646,11 +649,14 @@ function loop(){
 
   const db = toDb(r.rms);
   $("lvl").style.width = dbToPct(db) + "%";
-  $("lvlTxt").textContent = "入力 " + (db <= -99 ? "—" : db.toFixed(0) + " dB");
-  if (r.rms >= gateRms()) {
-    $("micHint").textContent = r.freq > 0 ? "" : "音程を判定できません（単音で伸ばして）";
-  } else if (db > -99) {
-    $("micHint").textContent = "音が小さい（しきい値 " + toDb(gateRms()).toFixed(0) + " dB 未満）";
+  $("lvlGate").style.left = dbToPct(S.gateDb) + "%";
+  $("lvlTxt").textContent = "入力 " + (db <= -99 ? "—" : db.toFixed(0) + " dB")
+    + "\u3000/\u3000周期性 " + r.clarity.toFixed(2);
+
+  if (r.freq <= 0 && db > -99){
+    $("micHint").textContent = r.rms < gateRms()
+      ? "音が小さい（しきい値未満）"
+      : "単音をのばしてください";
   } else {
     $("micHint").textContent = "";
   }
