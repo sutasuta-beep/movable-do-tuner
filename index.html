@@ -113,7 +113,7 @@
 <div class="wrap">
 
   <header>
-    <h1>移動ド音程チェッカー <span style="color:#5b6577">v7</span></h1>
+    <h1>移動ド音程チェッカー <span style="color:#5b6577">v8</span></h1>
     <div class="keybadge" id="keyBadge">Key: C major</div>
     <button class="iconbtn" id="btnSettings">設定</button>
   </header>
@@ -742,13 +742,71 @@ let smMidi = null;
 const histF = [];
 
 function showErr(msg){ const e = $("err"); e.style.display = "block"; e.innerHTML = msg; }
+
+// 端末とブラウザを判別する。iPadOS は UA が Macintosh を名乗るのでタッチ数で見分ける
+function platform(){
+  const ua = navigator.userAgent;
+  const iOS = /iPhone|iPad|iPod/.test(ua) ||
+              (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+  if (iOS) return /CriOS/.test(ua) ? "ios-chrome"
+         : /FxiOS|EdgiOS/.test(ua) ? "ios-other" : "ios-safari";
+  if (/Chrome|Chromium|Edg/.test(ua)) return "desktop-chrome";
+  if (/Safari/.test(ua)) return "mac-safari";
+  return "other";
+}
+
+// マイクが使えないときの、その端末で実際に通用する手順
+function micHelpHtml(err){
+  const name = err ? (err.name || String(err)) : "";
+  const head = err
+    ? "<b>マイクを開始できませんでした</b>（" + name + "）<br><br>"
+    : "";
+  const steps = {
+    "ios-safari":
+      "<b>iPhone / iPad の Safari</b><br>" +
+      "アドレスバーに許可メニューはありません。次のどちらかで許可してください。<br><br>" +
+      "① アドレスバー左端の <b>「ぁあ」</b>（またはページ設定アイコン）をタップ<br>" +
+      "　→ <b>Web サイトの設定</b> → <b>マイク</b> → <b>許可</b><br><br>" +
+      "② 設定アプリ → <b>Safari</b> → <b>マイク</b> → <b>確認</b> に戻す<br>" +
+      "　→ このページを再読み込みして、出てくる確認で「許可」<br><br>" +
+      "※ホーム画面に追加したアプリとして開いている場合は、許可を別に求められます。",
+    "ios-chrome":
+      "<b>iPhone / iPad の Chrome</b><br>" +
+      "設定アプリ → <b>Chrome</b> → <b>マイク</b> をオンにしてください。<br>" +
+      "そのあとこのページを再読み込みし、確認ダイアログで「許可」を選びます。",
+    "ios-other":
+      "<b>iPhone / iPad</b><br>" +
+      "設定アプリ → <b>このブラウザ名</b> → <b>マイク</b> をオンにしてから、再読み込みしてください。",
+    "desktop-chrome":
+      "<b>パソコンの Chrome / Edge</b><br>" +
+      "アドレスバー右端（またはURL左の🔒アイコン）のマイクアイコンから「許可」を選びます。<br>" +
+      "見つからない場合: 設定 → プライバシーとセキュリティ → サイトの設定 → マイク<br><br>" +
+      "Mac では加えて、システム設定 → プライバシーとセキュリティ → <b>マイク</b> で" +
+      "ブラウザ自体を許可する必要があります。",
+    "mac-safari":
+      "<b>Mac の Safari</b><br>" +
+      "メニューバーの <b>Safari → 設定 → Web サイト → マイク</b> でこのサイトを「許可」に。<br><br>" +
+      "加えて、システム設定 → プライバシーとセキュリティ → <b>マイク</b> で Safari を許可してください。",
+    "other":
+      "ブラウザのサイト設定で、このページのマイクを「許可」にしてください。",
+  };
+  return head + (steps[platform()] || steps.other) +
+    '<br><br><button class="iconbtn" id="btnRetryMic">許可したら、ここを押して再試行</button>';
+}
+
+function showMicErr(err){
+  showErr(micHelpHtml(err));
+  const b = $("btnRetryMic");
+  if (b) b.onclick = () => { clearErr(); toggleMic(); };
+}
 function clearErr(){ $("err").style.display = "none"; }
 
 async function toggleMic(){
   if (running){ stopMic(); return; }
   clearErr();
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
-    showErr("このブラウザ／URLではマイクを使えません。<b>http://localhost</b> か <b>https://</b> で開いてください。");
+    showErr("このブラウザ／URLではマイクを使えません。<b>https://</b> または " +
+            "<b>http://localhost</b> で開く必要があります。");
     return;
   }
   const audioConstraints = {
@@ -758,8 +816,7 @@ async function toggleMic(){
   try{
     stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
   }catch(err){
-    showErr("マイクを開始できませんでした：" + err.name +
-      "<br>ブラウザのアドレスバーからマイクを「許可」にしてください。");
+    showMicErr(err);
     return;
   }
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -878,7 +935,7 @@ if (!window.isSecureContext){
 }
 
 // 自己テスト用フック
-window.__mdc = { buildKey, detectPitch, pcName, playNote, midiToFreq, unlockAudio, get playMaster(){ return playMaster; }, get playCtx(){ return playCtx; }, get S(){ return S; }, get KEY(){ return KEY; } };
+window.__mdc = { buildKey, detectPitch, pcName, playNote, midiToFreq, unlockAudio, platform, micHelpHtml, get playMaster(){ return playMaster; }, get playCtx(){ return playCtx; }, get S(){ return S; }, get KEY(){ return KEY; } };
 </script>
 </body>
 </html>
