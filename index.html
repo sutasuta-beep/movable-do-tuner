@@ -110,7 +110,7 @@
 <div class="wrap">
 
   <header>
-    <h1>移動ド音程チェッカー <span style="color:#5b6577">v4</span></h1>
+    <h1>移動ド音程チェッカー <span style="color:#5b6577">v5</span></h1>
     <div class="keybadge" id="keyBadge">Key: C major</div>
     <button class="iconbtn" id="btnSettings">設定</button>
   </header>
@@ -196,6 +196,29 @@
         <span class="hint" id="gateHint"></span>
       </label>
       <input type="range" id="inGate" min="-95" max="-25" step="1" value="-90">
+    </div>
+
+    <h2 style="margin-top:16px">判定</h2>
+    <div class="field">
+      <label>「ぴったり」の許容幅
+        <span class="hint" id="tolHint"></span>
+      </label>
+      <div class="seg" id="segTol">
+        <button data-v="5">±5</button>
+        <button data-v="15">±15</button>
+        <button data-v="25" class="on">±25</button>
+        <button data-v="35">±35</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>針の落ち着き
+        <span class="hint">声＝ゆったり／楽器＝機敏</span>
+      </label>
+      <div class="seg" id="segSmooth">
+        <button data-v="0.5">機敏</button>
+        <button data-v="0.2">標準</button>
+        <button data-v="0.08" class="on">ゆったり</button>
+      </div>
     </div>
 
     <h2 style="margin-top:16px">表示</h2>
@@ -400,6 +423,7 @@ function detectPitch(buf, sr, gate, minF, maxF){
 const S = {
   root:0, mode:"major", minorSystem:"la", minorScale:"natural",
   lang:"ja", a4:440, gateDb:-90, hold:true, agc:true, deviceId:"",
+  tol:25, smooth:0.08,
 };
 // 判定は「周期性(clarity)」で行う。純ノイズの clarity は実測で最大 0.114 なので、
 // 0.65 を閾値にすれば音量に関係なくノイズだけを弾ける。
@@ -446,6 +470,14 @@ function renderStrip(){
   });
 }
 
+// 緑ゾーン（＝ぴったり範囲）の幅を許容幅に合わせる。メーターは -50〜+50 cent なので 1cent = 1%
+function syncZone(){
+  const z = document.querySelector(".zone");
+  z.style.left  = "calc(50% - " + S.tol + "%)";
+  z.style.width = (S.tol * 2) + "%";
+  $("tolHint").textContent = "±" + S.tol + " cent 以内を「ぴったり」とする";
+}
+
 let cur = { pc:null, cents:0, freq:0, midi:0, active:false };
 
 function render(){
@@ -465,7 +497,8 @@ function render(){
   const e = KEY.table[cur.pc];
   const c = cur.cents;
   const absC = Math.abs(c);
-  const color = absC <= 5 ? "var(--ok)" : absC <= 15 ? "var(--warn)" : "var(--bad)";
+  const T = S.tol;
+  const color = absC <= T ? "var(--ok)" : absC <= T * 2 ? "var(--warn)" : "var(--bad)";
 
   solfa.classList.toggle("idle", !cur.active);
   solfa.style.color = cur.active ? color : "";
@@ -485,9 +518,9 @@ function render(){
   needle.style.background = color;
 
   let v;
-  if (absC <= 5) v = "ぴったり";
-  else if (absC <= 15) v = c > 0 ? "ちょっと高い" : "ちょっと低い";
-  else if (absC <= 35) v = c > 0 ? "高い" : "低い";
+  if (absC <= T) v = "ぴったり";
+  else if (absC <= T * 2) v = c > 0 ? "ちょっと高い" : "ちょっと低い";
+  else if (absC <= T * 3.5) v = c > 0 ? "高い" : "低い";
   else v = c > 0 ? "かなり高い" : "かなり低い";
   $("verdict").textContent = v;
   $("verdict").style.color = color;
@@ -549,6 +582,22 @@ function initUI(){
   sw.classList.toggle("on", S.hold);
   sw.onclick = () => { S.hold = !S.hold; sw.classList.toggle("on", S.hold); saveSettings(); };
 
+  // 数値は文字列で持つ seg 用に、tol/smooth だけ別扱いで結線する
+  function segNum(id, key, after){
+    const el = $(id);
+    [...el.children].forEach(b => {
+      b.classList.toggle("on", Number(b.dataset.v) === S[key]);
+      b.onclick = () => {
+        S[key] = Number(b.dataset.v);
+        [...el.children].forEach(x => x.classList.toggle("on", x === b));
+        saveSettings(); if (after) after(); render();
+      };
+    });
+  }
+  segNum("segTol", "tol", syncZone);
+  segNum("segSmooth", "smooth");
+  syncZone();
+
   $("btnSettings").onclick = () => $("settings").classList.toggle("hidden");
   $("btnMic").onclick = toggleMic;
   syncMinorVisibility();
@@ -562,6 +611,8 @@ function syncMinorVisibility(){
    ============================================================ */
 let audioCtx = null, stream = null, analyser = null, running = false, rafId = 0;
 let buf = null, lastDetect = 0, lastHit = 0;
+// 表示用に平滑化した音高（MIDI番号の実数）。声の揺れで針が暴れるのを抑える
+let smMidi = null;
 const histF = [];
 
 function showErr(msg){ const e = $("err"); e.style.display = "block"; e.innerHTML = msg; }
@@ -597,6 +648,7 @@ async function toggleMic(){
   $("btnMic").textContent = "マイク停止";
   $("btnMic").classList.add("stop");
   histF.length = 0;
+  smMidi = null;
   populateDevices();
   loop();
 }
@@ -666,13 +718,17 @@ function loop(){
     if (histF.length > 3) histF.shift();
     const f = median(histF);
     const midiF = 69 + 12 * Math.log2(f / S.a4);
-    const midi = Math.round(midiF);
-    const cents = (midiF - midi) * 100;
+    // 半音以上跳んだら別の音とみなして即座に追従、それ以外は指数移動平均で滑らかに
+    if (smMidi === null || Math.abs(midiF - smMidi) > 0.7) smMidi = midiF;
+    else smMidi += S.smooth * (midiF - smMidi);
+    const midi = Math.round(smMidi);
+    const cents = (smMidi - midi) * 100;
     cur = { pc: ((midi % 12) + 12) % 12, cents, freq: f, midi, active: true };
     lastHit = now;
     render();
   } else {
     histF.length = 0;
+    smMidi = null;
     const holdMs = S.hold ? 1200 : 250;
     if (cur.pc !== null && now - lastHit > holdMs){
       cur = { pc:null, cents:0, freq:0, midi:0, active:false };
