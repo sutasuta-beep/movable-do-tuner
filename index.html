@@ -113,7 +113,7 @@
 <div class="wrap">
 
   <header>
-    <h1>移動ド音程チェッカー <span style="color:#5b6577">v8</span></h1>
+    <h1>移動ド音程チェッカー <span style="color:#5b6577">v9</span></h1>
     <div class="keybadge" id="keyBadge">Key: C major</div>
     <button class="iconbtn" id="btnSettings">設定</button>
   </header>
@@ -794,10 +794,53 @@ function micHelpHtml(err){
     '<br><br><button class="iconbtn" id="btnRetryMic">許可したら、ここを押して再試行</button>';
 }
 
-function showMicErr(err){
-  showErr(micHelpHtml(err));
+// 原因を切り分けるための情報を、推測なしで実際に集める
+async function collectDiag(err){
+  const L = [];
+  L.push("版: v9");
+  L.push("エラー: " + (err ? (err.name || "?") + " / " + (err.message || "") : "なし"));
+  L.push("端末判定: " + platform());
+  L.push("secureContext: " + window.isSecureContext + " (" + location.protocol + ")");
+  let standalone = false;
+  try { standalone = navigator.standalone === true ||
+        window.matchMedia("(display-mode: standalone)").matches; } catch(e){}
+  L.push("ホーム画面アプリとして起動: " + standalone);
+  L.push("getUserMedia: " + !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia));
+  try {
+    const st = (await navigator.permissions.query({ name:"microphone" })).state;
+    L.push("permissions.microphone: " + st);
+  } catch(e){ L.push("permissions.microphone: 取得不可（Safariは非対応）"); }
+  try {
+    const ds = await navigator.mediaDevices.enumerateDevices();
+    const ins = ds.filter(d => d.kind === "audioinput");
+    L.push("入力デバイス: " + ins.length + "個 [" +
+           ins.map(d => d.label || "(名前非公開)").join(", ") + "]");
+  } catch(e){ L.push("enumerateDevices: 失敗 " + e.name); }
+  L.push("保存中のdeviceId: " + (S.deviceId || "なし"));
+  L.push("UA: " + navigator.userAgent);
+  return L.join("\n");
+}
+
+async function showMicErr(err){
+  showErr(micHelpHtml(err) +
+    '<br><br><b>診断情報</b>（そのままコピーして伝えてください）' +
+    '<pre id="diagText" style="white-space:pre-wrap;word-break:break-all;font-size:11px;' +
+    'background:#241414;border:1px solid #6b2b2b;border-radius:8px;padding:8px;margin:6px 0 0">収集中…</pre>' +
+    '<button class="iconbtn" id="btnCopyDiag">診断情報をコピー</button>');
   const b = $("btnRetryMic");
   if (b) b.onclick = () => { clearErr(); toggleMic(); };
+  const text = await collectDiag(err);
+  const pre = $("diagText");
+  if (pre) pre.textContent = text;
+  const cb = $("btnCopyDiag");
+  if (cb) cb.onclick = async () => {
+    try { await navigator.clipboard.writeText(text); cb.textContent = "コピーしました"; }
+    catch(e){
+      const r = document.createRange(); r.selectNodeContents(pre);
+      const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      cb.textContent = "選択しました（長押しでコピー）";
+    }
+  };
 }
 function clearErr(){ $("err").style.display = "none"; }
 
@@ -809,15 +852,26 @@ async function toggleMic(){
             "<b>http://localhost</b> で開く必要があります。");
     return;
   }
-  const audioConstraints = {
-    echoCancellation:false, noiseSuppression:false, autoGainControl:S.agc,
-  };
-  if (S.deviceId) audioConstraints.deviceId = { exact: S.deviceId };
-  try{
-    stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
-  }catch(err){
-    showMicErr(err);
+  // 制約が厳しすぎて失敗する場合があるので、条件を緩めながら順に試す。
+  // 特に保存済み deviceId は端末側で無効になっていることがあり、exact 指定だと必ず失敗する
+  const base = { echoCancellation:false, noiseSuppression:false, autoGainControl:S.agc };
+  const attempts = [];
+  if (S.deviceId) attempts.push(["保存したデバイス", { audio: Object.assign({ deviceId:{ exact:S.deviceId } }, base) }]);
+  attempts.push(["既定のデバイス", { audio: base }]);
+  attempts.push(["最小構成",       { audio: true }]);
+
+  let lastErr = null, usedLabel = null;
+  for (const [label, c] of attempts){
+    try { stream = await navigator.mediaDevices.getUserMedia(c); usedLabel = label; break; }
+    catch(e){ lastErr = e; stream = null; }
+  }
+  if (!stream){
+    await showMicErr(lastErr);
     return;
+  }
+  if (usedLabel === "最小構成" || (S.deviceId && usedLabel !== "保存したデバイス")){
+    S.deviceId = "";   // 無効なデバイス指定は捨てる
+    saveSettings();
   }
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   await audioCtx.resume();
@@ -935,7 +989,7 @@ if (!window.isSecureContext){
 }
 
 // 自己テスト用フック
-window.__mdc = { buildKey, detectPitch, pcName, playNote, midiToFreq, unlockAudio, platform, micHelpHtml, get playMaster(){ return playMaster; }, get playCtx(){ return playCtx; }, get S(){ return S; }, get KEY(){ return KEY; } };
+window.__mdc = { buildKey, detectPitch, pcName, playNote, midiToFreq, unlockAudio, platform, micHelpHtml, collectDiag, get playMaster(){ return playMaster; }, get playCtx(){ return playCtx; }, get S(){ return S; }, get KEY(){ return KEY; } };
 </script>
 </body>
 </html>
