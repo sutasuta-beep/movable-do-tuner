@@ -98,8 +98,12 @@
   .err{background:#3a1d1d;border:1px solid #6b2b2b;color:#ffc9c9;border-radius:12px;
     padding:10px 12px;font-size:13px;margin-top:12px;line-height:1.6;display:none}
   .hidden{display:none !important}
-  .lvl{height:4px;background:var(--panel2);border-radius:3px;overflow:hidden;margin-top:10px}
-  .lvl i{display:block;height:100%;width:0;background:var(--accent);transition:width .08s}
+  .lvl{position:relative;height:8px;background:var(--panel2);border-radius:4px;overflow:hidden;margin-top:10px}
+  .lvl i{display:block;height:100%;width:0;background:var(--accent);transition:width .06s}
+  .lvl b{position:absolute;top:0;bottom:0;width:2px;background:var(--warn);left:0}
+  .lvlrow{display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--dim);
+    margin-top:4px;min-height:15px}
+  .lvlrow #micHint{color:var(--warn);text-align:right}
 </style>
 </head>
 <body>
@@ -125,7 +129,11 @@
     </div>
     <div class="verdict" id="verdict"></div>
     <div class="cents" id="centsTxt"></div>
-    <div class="lvl"><i id="lvl"></i></div>
+    <div class="lvl"><i id="lvl"></i><b id="lvlGate"></b></div>
+    <div class="lvlrow">
+      <span id="lvlTxt">入力 —</span>
+      <span id="micHint"></span>
+    </div>
   </div>
 
   <div class="strip" id="strip"></div>
@@ -172,6 +180,24 @@
       </div>
     </div>
 
+    <h2 style="margin-top:16px">マイク</h2>
+    <div class="field">
+      <label>入力デバイス</label>
+      <select id="selDevice"><option value="">自動（既定のマイク）</option></select>
+    </div>
+    <div class="field">
+      <label>自動ゲイン調整（AGC）
+        <span class="hint">入力が小さいときはONのままに</span>
+      </label>
+      <div class="sw on" id="swAgc"></div>
+    </div>
+    <div class="field">
+      <label>無音しきい値
+        <span class="hint" id="gateHint"></span>
+      </label>
+      <input type="range" id="inGate" min="1" max="60" step="1" value="10">
+    </div>
+
     <h2 style="margin-top:16px">表示</h2>
     <div class="field">
       <label>階名の表記</label>
@@ -183,12 +209,6 @@
     <div class="field">
       <label>基準ピッチ A4</label>
       <span><input type="number" id="inA4" min="392" max="470" step="0.5" value="440" style="min-width:88px"> Hz</span>
-    </div>
-    <div class="field">
-      <label>マイク感度（無音しきい値）
-        <span class="hint" id="gateHint"></span>
-      </label>
-      <input type="range" id="inGate" min="1" max="60" step="1" value="12">
     </div>
     <div class="field">
       <label>表示の安定化<span class="hint">音が途切れても少し保持</span></label>
@@ -375,9 +395,15 @@ function detectPitch(buf, sr, gate, minF, maxF){
    ============================================================ */
 const S = {
   root:0, mode:"major", minorSystem:"la", minorScale:"natural",
-  lang:"ja", a4:440, gate:12, hold:true,
+  lang:"ja", a4:440, gate:10, hold:true, agc:true, deviceId:"",
 };
-const LS = "movabledo.settings.v1";
+// しきい値は S.gate/5000（= gate 10 で RMS 0.002 ≒ -54dB）
+const GATE_DIV = 5000;
+const gateRms = () => S.gate / GATE_DIV;
+const toDb = v => v > 1e-7 ? 20 * Math.log10(v) : -100;
+// -80dB〜0dB を 0〜100% に写す（メーター表示用）
+const dbToPct = db => Math.max(0, Math.min(100, (db + 80) / 80 * 100));
+const LS = "movabledo.settings.v2";
 function loadSettings(){
   try{ Object.assign(S, JSON.parse(localStorage.getItem(LS) || "{}")); }catch(e){}
 }
@@ -497,9 +523,24 @@ function initUI(){
   $("inA4").value = S.a4;
   $("inA4").onchange = () => { S.a4 = Number($("inA4").value) || 440; saveSettings(); };
   $("inGate").value = S.gate;
-  const gateTxt = () => $("gateHint").textContent = "しきい値 " + (S.gate/1000).toFixed(3);
+  const gateTxt = () => {
+    $("gateHint").textContent = "これより小さい音は無視（" + toDb(gateRms()).toFixed(0) + " dB）";
+    $("lvlGate").style.left = dbToPct(toDb(gateRms())) + "%";
+  };
   $("inGate").oninput = () => { S.gate = Number($("inGate").value); gateTxt(); saveSettings(); };
   gateTxt();
+
+  const swAgc = $("swAgc");
+  swAgc.classList.toggle("on", S.agc);
+  swAgc.onclick = () => {
+    S.agc = !S.agc; swAgc.classList.toggle("on", S.agc); saveSettings();
+    if (running) restartMic();
+  };
+
+  $("selDevice").onchange = () => {
+    S.deviceId = $("selDevice").value; saveSettings();
+    if (running) restartMic();
+  };
 
   const sw = $("swHold");
   sw.classList.toggle("on", S.hold);
@@ -530,10 +571,12 @@ async function toggleMic(){
     showErr("このブラウザ／URLではマイクを使えません。<b>http://localhost</b> か <b>https://</b> で開いてください。");
     return;
   }
+  const audioConstraints = {
+    echoCancellation:false, noiseSuppression:false, autoGainControl:S.agc,
+  };
+  if (S.deviceId) audioConstraints.deviceId = { exact: S.deviceId };
   try{
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false }
-    });
+    stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
   }catch(err){
     showErr("マイクを開始できませんでした：" + err.name +
       "<br>ブラウザのアドレスバーからマイクを「許可」にしてください。");
@@ -551,8 +594,28 @@ async function toggleMic(){
   $("btnMic").textContent = "マイク停止";
   $("btnMic").classList.add("stop");
   histF.length = 0;
+  populateDevices();
   loop();
 }
+
+// 権限が下りた後でないとデバイス名が取れないため、開始後に一覧を作る
+async function populateDevices(){
+  try{
+    const list = await navigator.mediaDevices.enumerateDevices();
+    const sel = $("selDevice");
+    const ins = list.filter(d => d.kind === "audioinput");
+    sel.innerHTML = '<option value="">自動（既定のマイク）</option>';
+    ins.forEach((d, i) => {
+      const o = document.createElement("option");
+      o.value = d.deviceId;
+      o.textContent = d.label || ("マイク " + (i+1));
+      sel.appendChild(o);
+    });
+    sel.value = S.deviceId || "";
+  }catch(e){}
+}
+
+async function restartMic(){ stopMic(); await toggleMic(); }
 
 function stopMic(){
   running = false;
@@ -564,6 +627,8 @@ function stopMic(){
   $("btnMic").classList.remove("stop");
   cur = { pc:null, cents:0, freq:0, midi:0, active:false };
   $("lvl").style.width = "0%";
+  $("lvlTxt").textContent = "入力 —";
+  $("micHint").textContent = "";
   render();
 }
 
@@ -577,9 +642,18 @@ function loop(){
   lastDetect = now;
 
   analyser.getFloatTimeDomainData(buf);
-  const r = detectPitch(buf, audioCtx.sampleRate, S.gate/1000, 55, 1600);
+  const r = detectPitch(buf, audioCtx.sampleRate, gateRms(), 55, 1600);
 
-  $("lvl").style.width = Math.min(100, r.rms * 300) + "%";
+  const db = toDb(r.rms);
+  $("lvl").style.width = dbToPct(db) + "%";
+  $("lvlTxt").textContent = "入力 " + (db <= -99 ? "—" : db.toFixed(0) + " dB");
+  if (r.rms >= gateRms()) {
+    $("micHint").textContent = r.freq > 0 ? "" : "音程を判定できません（単音で伸ばして）";
+  } else if (db > -99) {
+    $("micHint").textContent = "音が小さい（しきい値 " + toDb(gateRms()).toFixed(0) + " dB 未満）";
+  } else {
+    $("micHint").textContent = "";
+  }
 
   if (r.freq > 0){
     histF.push(r.freq);
