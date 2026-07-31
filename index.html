@@ -113,7 +113,7 @@
 <div class="wrap">
 
   <header>
-    <h1>移動ド音程チェッカー <span style="color:#5b6577">v6</span></h1>
+    <h1>移動ド音程チェッカー <span style="color:#5b6577">v7</span></h1>
     <div class="keybadge" id="keyBadge">Key: C major</div>
     <button class="iconbtn" id="btnSettings">設定</button>
   </header>
@@ -207,6 +207,12 @@
         <span class="hint" id="volHint"></span>
       </label>
       <input type="range" id="inVol" min="0" max="100" step="1" value="50">
+    </div>
+    <div class="field">
+      <label>音が出ないときは
+        <span class="hint" id="audioDiag">出力の状態: 未作成</span>
+      </label>
+      <button class="iconbtn" id="btnTestTone">テスト音</button>
     </div>
     <div class="field">
       <label>オクターブ
@@ -443,6 +449,16 @@ function detectPitch(buf, sr, gate, minF, maxF){
    ============================================================ */
 let playCtx = null, playMaster = null;
 
+// iOS はサイレントスイッチが入っていると Web Audio を鳴らさない。
+// audioSession を明示すると、消音中でも再生できる（Safari 16.4+）。
+// マイク使用中は play-and-record にしないと出力が受話口側に回って極端に小さくなる。
+function setAudioSession(){
+  try{
+    if (navigator.audioSession)
+      navigator.audioSession.type = running ? "play-and-record" : "playback";
+  }catch(e){}
+}
+
 function ensurePlayCtx(){
   if (!playCtx){
     playCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -450,21 +466,32 @@ function ensurePlayCtx(){
     playMaster.gain.value = 1;
     playMaster.connect(playCtx.destination);
   }
-  if (playCtx.state === "suspended") playCtx.resume();
+  setAudioSession();
   return playCtx;
 }
+
+// 最初のタップで音声出力を解禁しておく（iOS/Chrome の自動再生制限対策）
+function unlockAudio(){
+  try{
+    const ctx = ensurePlayCtx();
+    ctx.resume();
+    const b = ctx.createBuffer(1, 1, ctx.sampleRate);
+    const src = ctx.createBufferSource();
+    src.buffer = b; src.connect(ctx.destination); src.start(0);
+  }catch(e){}
+}
+document.addEventListener("pointerdown", unlockAudio, { once:true });
+document.addEventListener("touchstart",  unlockAudio, { once:true });
 
 // MIDI番号 → 周波数（基準ピッチ A4 の設定を反映する）
 const midiToFreq = midi => S.a4 * Math.pow(2, (midi - 69) / 12);
 
-function playNote(midi){
-  if (S.vol <= 0) return;
-  const ctx = ensurePlayCtx();
+function scheduleNote(ctx, midi){
   const f = midiToFreq(midi);
-  const t0 = ctx.currentTime;
+  const t0 = ctx.currentTime + 0.01;
   const o1 = ctx.createOscillator(); o1.type = "triangle"; o1.frequency.value = f;
   const o2 = ctx.createOscillator(); o2.type = "sine";     o2.frequency.value = f * 2;
-  const g2 = ctx.createGain(); g2.gain.value = 0.18;       // 倍音を少し足して聞き取りやすく
+  const g2 = ctx.createGain(); g2.gain.value = 0.18;
   const g  = ctx.createGain();
   const v = Math.max(0.0002, S.vol);
   g.gain.setValueAtTime(0.0001, t0);
@@ -474,6 +501,28 @@ function playNote(midi){
   o1.connect(g); o2.connect(g2).connect(g); g.connect(playMaster);
   o1.start(t0); o2.start(t0);
   o1.stop(t0 + 1.0); o2.stop(t0 + 1.0);
+}
+
+function playNote(midi){
+  if (S.vol <= 0) return;
+  const ctx = ensurePlayCtx();
+  // suspended のまま予約すると鳴らないことがあるので、再開を待ってから鳴らす
+  if (ctx.state !== "running"){
+    ctx.resume().then(() => scheduleNote(ctx, midi)).catch(() => {});
+  } else {
+    scheduleNote(ctx, midi);
+  }
+  updateAudioDiag();
+}
+
+// 音が出ないときに原因を切り分けるための状態表示
+function updateAudioDiag(){
+  const el = $("audioDiag");
+  if (!el) return;
+  const st = playCtx ? playCtx.state : "未作成";
+  el.textContent = "出力の状態: " + st
+    + " / 音量 " + Math.round(S.vol * 100) + "%"
+    + (navigator.audioSession ? " / audioSession " + navigator.audioSession.type : " / audioSession 非対応");
 }
 
 /* ============================================================
@@ -667,6 +716,9 @@ function initUI(){
   $("inVol").oninput = () => { S.vol = Number($("inVol").value) / 100; volTxt(); saveSettings(); };
   volTxt();
 
+  $("btnTestTone").onclick = () => { unlockAudio(); playNote(69); };   // A4
+  updateAudioDiag();
+
   segNum("segOct", "octShift", renderStrip);
   segNum("segTol", "tol", syncZone);
   segNum("segSmooth", "smooth");
@@ -719,6 +771,7 @@ async function toggleMic(){
   src.connect(analyser);
   buf = new Float32Array(analyser.fftSize);
   running = true;
+  setAudioSession();
   $("btnMic").textContent = "マイク停止";
   $("btnMic").classList.add("stop");
   histF.length = 0;
@@ -752,6 +805,7 @@ function stopMic(){
   if (stream) stream.getTracks().forEach(t => t.stop());
   if (audioCtx) audioCtx.close();
   stream = audioCtx = analyser = null;
+  setAudioSession();
   $("btnMic").textContent = "マイク開始";
   $("btnMic").classList.remove("stop");
   cur = { pc:null, cents:0, freq:0, midi:0, active:false };
@@ -824,7 +878,7 @@ if (!window.isSecureContext){
 }
 
 // 自己テスト用フック
-window.__mdc = { buildKey, detectPitch, pcName, playNote, midiToFreq, get playMaster(){ return playMaster; }, get playCtx(){ return playCtx; }, get S(){ return S; }, get KEY(){ return KEY; } };
+window.__mdc = { buildKey, detectPitch, pcName, playNote, midiToFreq, unlockAudio, get playMaster(){ return playMaster; }, get playCtx(){ return playCtx; }, get S(){ return S; }, get KEY(){ return KEY; } };
 </script>
 </body>
 </html>
