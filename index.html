@@ -113,7 +113,7 @@
 <div class="wrap">
 
   <header>
-    <h1>移動ド音程チェッカー <span style="color:#5b6577">v9</span></h1>
+    <h1>移動ド音程チェッカー <span style="color:#5b6577">v10</span></h1>
     <div class="keybadge" id="keyBadge">Key: C major</div>
     <button class="iconbtn" id="btnSettings">設定</button>
   </header>
@@ -452,10 +452,9 @@ let playCtx = null, playMaster = null;
 // iOS はサイレントスイッチが入っていると Web Audio を鳴らさない。
 // audioSession を明示すると、消音中でも再生できる（Safari 16.4+）。
 // マイク使用中は play-and-record にしないと出力が受話口側に回って極端に小さくなる。
-function setAudioSession(){
+function setAudioSession(kind){
   try{
-    if (navigator.audioSession)
-      navigator.audioSession.type = running ? "play-and-record" : "playback";
+    if (navigator.audioSession) navigator.audioSession.type = kind;
   }catch(e){}
 }
 
@@ -466,7 +465,7 @@ function ensurePlayCtx(){
     playMaster.gain.value = 1;
     playMaster.connect(playCtx.destination);
   }
-  setAudioSession();
+  // ここでカテゴリを触らない。playback を立てるとマイクが開けなくなる
   return playCtx;
 }
 
@@ -522,7 +521,8 @@ function updateAudioDiag(){
   const st = playCtx ? playCtx.state : "未作成";
   el.textContent = "出力の状態: " + st
     + " / 音量 " + Math.round(S.vol * 100) + "%"
-    + (navigator.audioSession ? " / audioSession " + navigator.audioSession.type : " / audioSession 非対応");
+    + (navigator.audioSession ? " / audioSession " + navigator.audioSession.type : " / audioSession 非対応")
+    + (running ? " / 録音中" : "");
 }
 
 /* ============================================================
@@ -797,7 +797,7 @@ function micHelpHtml(err){
 // 原因を切り分けるための情報を、推測なしで実際に集める
 async function collectDiag(err){
   const L = [];
-  L.push("版: v9");
+  L.push("版: v10");
   L.push("エラー: " + (err ? (err.name || "?") + " / " + (err.message || "") : "なし"));
   L.push("端末判定: " + platform());
   L.push("secureContext: " + window.isSecureContext + " (" + location.protocol + ")");
@@ -816,6 +816,7 @@ async function collectDiag(err){
     L.push("入力デバイス: " + ins.length + "個 [" +
            ins.map(d => d.label || "(名前非公開)").join(", ") + "]");
   } catch(e){ L.push("enumerateDevices: 失敗 " + e.name); }
+  L.push("audioSession: " + (navigator.audioSession ? navigator.audioSession.type : "非対応"));
   L.push("保存中のdeviceId: " + (S.deviceId || "なし"));
   L.push("UA: " + navigator.userAgent);
   return L.join("\n");
@@ -854,6 +855,10 @@ async function toggleMic(){
   }
   // 制約が厳しすぎて失敗する場合があるので、条件を緩めながら順に試す。
   // 特に保存済み deviceId は端末側で無効になっていることがあり、exact 指定だと必ず失敗する
+  // 録音の前に必ず録音可能なカテゴリへ。playback のままだと
+  // InvalidStateError (AudioSession category is not compatible with audio capture) になる
+  setAudioSession("play-and-record");
+
   const base = { echoCancellation:false, noiseSuppression:false, autoGainControl:S.agc };
   const attempts = [];
   if (S.deviceId) attempts.push(["保存したデバイス", { audio: Object.assign({ deviceId:{ exact:S.deviceId } }, base) }]);
@@ -864,6 +869,14 @@ async function toggleMic(){
   for (const [label, c] of attempts){
     try { stream = await navigator.mediaDevices.getUserMedia(c); usedLabel = label; break; }
     catch(e){ lastErr = e; stream = null; }
+  }
+  // それでも駄目なら、カテゴリ指定そのものを諦めてブラウザ任せ(auto)で再挑戦する
+  if (!stream){
+    setAudioSession("auto");
+    for (const [label, c] of attempts){
+      try { stream = await navigator.mediaDevices.getUserMedia(c); usedLabel = label + "(auto)"; break; }
+      catch(e){ lastErr = e; stream = null; }
+    }
   }
   if (!stream){
     await showMicErr(lastErr);
@@ -882,7 +895,6 @@ async function toggleMic(){
   src.connect(analyser);
   buf = new Float32Array(analyser.fftSize);
   running = true;
-  setAudioSession();
   $("btnMic").textContent = "マイク停止";
   $("btnMic").classList.add("stop");
   histF.length = 0;
@@ -916,7 +928,8 @@ function stopMic(){
   if (stream) stream.getTracks().forEach(t => t.stop());
   if (audioCtx) audioCtx.close();
   stream = audioCtx = analyser = null;
-  setAudioSession();
+  // 録音が終わったら再生向けに戻す（消音スイッチ中でも試聴音が鳴るように）
+  setAudioSession("playback");
   $("btnMic").textContent = "マイク開始";
   $("btnMic").classList.remove("stop");
   cur = { pc:null, cents:0, freq:0, midi:0, active:false };
@@ -989,7 +1002,7 @@ if (!window.isSecureContext){
 }
 
 // 自己テスト用フック
-window.__mdc = { buildKey, detectPitch, pcName, playNote, midiToFreq, unlockAudio, platform, micHelpHtml, collectDiag, get playMaster(){ return playMaster; }, get playCtx(){ return playCtx; }, get S(){ return S; }, get KEY(){ return KEY; } };
+window.__mdc = { buildKey, detectPitch, pcName, playNote, midiToFreq, unlockAudio, platform, micHelpHtml, collectDiag, setAudioSession, get playMaster(){ return playMaster; }, get playCtx(){ return playCtx; }, get S(){ return S; }, get KEY(){ return KEY; } };
 </script>
 </body>
 </html>
