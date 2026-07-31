@@ -2,7 +2,13 @@
 
 マイク入力の音高を **移動ド（可動ド）** で表示するブラウザアプリ。単一 HTML・依存ライブラリなし。
 
-## 起動
+## 公開URL（本番）
+**https://sutasuta-beep.github.io/movable-do-tuner/**
+- リポジトリ: `git@github.com:sutasuta-beep/movable-do-tuner.git`（public / GitHub Pages: main ブランチ / (root)）
+- push は SSH 鍵認証（`~/.ssh/id_ed25519_github`、GitHub側の鍵名「Mac mini (movable-do-tuner)」）
+- iPad/iPhone はこのURLをSafariで開き「ホーム画面に追加」で常用できる
+
+## 起動（ローカル開発用）
 - `起動.command` をダブルクリック → ローカルサーバ(:8765)を起動し Chrome で開く
 - `停止.command` でサーバ停止
 - ※ `file://` 直開きではマイクが使えない（Secure Context 必須）。必ず `http://localhost:8765/` で開く。
@@ -36,6 +42,6 @@
 ## 既知の制限 / 次の候補
 - タブが非アクティブだと requestAnimationFrame が止まる（＝検出も止まる）。仕様として許容。
 - 単音のみ。和音・重音は不可。
-- **iPhone で使うには https が必要**（LAN の生 IP では Safari がマイクを許可しない）。
-  → GitHub Pages 公開が最短。未実施（ユーザー承認待ち）。
+- **https 必須**（LAN の生 IP では Safari がマイクを許可しない）→ GitHub Pages で解決済み。
+- 更新手順: ローカルで編集 → `git add -A && git commit && git push` → 1〜2分でPagesに反映。
 - 候補: 基準音の再生（聴き比べ）、録音して階名の履歴を残す、移調楽器対応、Ⅴ7 以外のセカンダリドミナント表示
